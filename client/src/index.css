@@ -1,0 +1,19 @@
+@import 'tailwindcss';
+@plugin "daisyui";
+
+/* Global styles */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: radial-gradient(
+    circle,
+    rgba(255, 255, 255, 1) 0%,
+    rgb(130, 134, 139) 100%
+  );
+}

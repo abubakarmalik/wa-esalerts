@@ -1,0 +1,52 @@
+### WhatsApp Automation API - HTTP Requests for Testing
+### Complete test suite for all endpoints
+
+### ========================================
+### 1. SERVER HEALTH CHECK
+### ========================================
+
+### Check if server is running
+GET http://localhost:3000/health
+
+### ========================================
+### 2. SIMPLE REQUEST FORMAT
+### ========================================
+
+### Simple Database Connection Request
+POST http://localhost:3000/api/database-connection
+Content-Type: application/json
+
+{
+  "MSSQL_SERVER": "localhost",
+  "MSSQL_DB": "ESAlerts",
+  "MSSQL_USER": "sa",
+  "MSSQL_PASSWORD": "1232018"
+}
+
+### Simple Get Records Request
+GET http://localhost:3000/api/getrecords
+
+### Simple WhatsApp Automation Request
+POST http://localhost:3000/api/send-messages
+Content-Type: application/json
+
+{}
+
+
+### Simple Stop WhatsApp Automation Request
+POST http://localhost:3000/api/stop-sender
+Content-Type: application/json
+
+{}
+
+### Simple Close Connection Request
+POST http://localhost:3000/api/close-database-connection
+Content-Type: application/json
+
+{}
+
+
+
+
+ 
+
