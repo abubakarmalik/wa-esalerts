@@ -4,7 +4,7 @@ server/node_modules/
 client/build/
 server/dist/
 server/src/config/.db_config.json
-server/src/.wwebjs_auth
+server/wa-openwa-session
 .env
 .env.local
 **/.local-chromium/
