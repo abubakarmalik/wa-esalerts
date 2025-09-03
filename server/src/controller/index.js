@@ -1,4 +1,4 @@
-const path = require('path');
+// server/src/controllers/index.js
 
 const {
   initializeConnection,
@@ -9,7 +9,7 @@ const {
 
 const {
   fetchTopPending,
-  initializeWhatsAppClient,
+  initializeOpenWAClient,
   sendSingleMessage,
   sleep,
   randInt,
@@ -17,42 +17,28 @@ const {
   logErr,
   logWarn,
   clearWhatsAppSession,
-  toChatId,
   formatNumberForWhatsApp,
   markFailed,
-} = require('../config/helper');
 
-const {
+  // broadcast helpers
   prepareBroadcastPayload,
   getBroadcastNumbersFromDb,
   sendBroadcastToOne,
 } = require('../config/helper');
 
-/**
- * Database Connection Controller
- * Simplified version for SMS application
- */
-
-// Global control for WhatsApp sender
-const senderControl = {
-  stopRequested: false,
-  isRunning: false,
-};
-
-// Hold a single WhatsApp client instance so we can destroy it on hard stop
+// Global OpenWA client + run control
 let waClient = null;
+const senderControl = { stopRequested: false, isRunning: false };
 
-//==================database connection==================
+//================== Database: connect ==================
 const databaseConnection = async (req, res) => {
   try {
-    // If already connected, do not proceed
     if (isConnected()) {
-      return res.status(200).json({
-        success: true,
-        message: 'Database is already connected',
-      });
+      return res
+        .status(200)
+        .json({ success: true, message: 'Database is already connected' });
     }
-    // Extract database configuration from request body
+
     const {
       MSSQL_SERVER,
       MSSQL_DB,
@@ -63,7 +49,6 @@ const databaseConnection = async (req, res) => {
       MSSQL_TRUST_CERT,
     } = req.body;
 
-    // Validate required parameters
     if (!MSSQL_SERVER || !MSSQL_DB || !MSSQL_USER || !MSSQL_PASSWORD) {
       return res.status(400).json({
         success: false,
@@ -72,7 +57,6 @@ const databaseConnection = async (req, res) => {
       });
     }
 
-    // Initialize global database connection
     const connectionResult = await initializeConnection({
       server: MSSQL_SERVER,
       database: MSSQL_DB,
@@ -102,10 +86,9 @@ const databaseConnection = async (req, res) => {
   }
 };
 
-//==================get all records==================
+//================== Records: list pending ==================
 const getAllRecords = async (_req, res) => {
   try {
-    // Check if database connection is active
     if (!isConnected()) {
       return res.status(500).json({
         success: false,
@@ -114,9 +97,8 @@ const getAllRecords = async (_req, res) => {
       });
     }
 
-    // Execute query using global connection
     const query = `
-      SELECT 
+       SELECT 
         SystemCode, 
         CampusCode, 
         CreationDate, 
@@ -129,12 +111,8 @@ const getAllRecords = async (_req, res) => {
       WHERE SendStatus = 0
       ORDER BY CreationDate ASC, SrNo ASC;
     `;
-
     const result = await executeQuery(query);
-
-    if (!result.success) {
-      return res.status(500).json(result);
-    }
+    if (!result.success) return res.status(500).json(result);
 
     res.status(200).json({
       success: true,
@@ -152,10 +130,9 @@ const getAllRecords = async (_req, res) => {
   }
 };
 
-//========Send whatsapp massages ===============
+// ================== WhatsApp: sender SSE loop (OpenWA) ==================
 const sendWhatsAppMessages = async (req, res) => {
   try {
-    // Check if database connection is active
     if (!isConnected()) {
       return res.status(500).json({
         success: false,
@@ -164,43 +141,40 @@ const sendWhatsAppMessages = async (req, res) => {
       });
     }
 
-    // Prevent multiple concurrent runs
     if (senderControl.isRunning) {
-      return res.status(409).json({
-        success: false,
-        message: 'Sender is already running',
-      });
+      return res
+        .status(409)
+        .json({ success: false, message: 'Sender is already running' });
     }
 
-    let client = null;
-    let processedCount = 0;
-    let errorCount = 0;
-
-    // Set response headers for Server-Sent Events (SSE)
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    });
-    if (typeof res.flushHeaders === 'function') {
-      res.flushHeaders();
+    // --- SSE setup ---
+    // disable any request/socket timeouts for this SSE
+    if (req.socket) {
+      req.setTimeout(0);
+      req.socket.setTimeout(0);
+      req.socket.setKeepAlive(true, 60_000); // 60s TCP keepalive
     }
 
-    // Optional heartbeat to keep SSE alive. Disabled by default to avoid empty lines in clients.
-    const hbIntervalMs = Number(process.env.SSE_HEARTBEAT_MS || 0);
+    // SSE headers (no buffering)
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // for nginx
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+    const hbIntervalMs = Number(process.env.SSE_HEARTBEAT_MS || 15000);
     const heartbeat =
       hbIntervalMs > 0
         ? setInterval(() => {
             try {
-              res.write(': ping\n\n'); // comment line per SSE spec
+              res.write(': ping\n\n'); // SSE comment line
               if (typeof res.flush === 'function') res.flush();
             } catch {}
           }, hbIntervalMs)
         : null;
 
-    // Clean up if client disconnects early
+    let sseOpen = true;
     req.on('close', () => {
       try {
         if (heartbeat) clearInterval(heartbeat);
@@ -211,9 +185,8 @@ const sendWhatsAppMessages = async (req, res) => {
       } catch {}
     });
 
-    let sseOpen = true;
     const sendStatusUpdate = (status, data = {}) => {
-      if (!sseOpen) return; // avoid writes after client disconnects
+      if (!sseOpen) return;
       const update = JSON.stringify({
         timestamp: new Date().toISOString(),
         status,
@@ -225,31 +198,29 @@ const sendWhatsAppMessages = async (req, res) => {
       } catch {}
     };
 
+    // --- init + loop ---
+    let client = null;
+    let processedCount = 0;
+    let errorCount = 0;
+
     try {
-      // Reset stop flag and set running state
       senderControl.stopRequested = false;
       senderControl.isRunning = true;
-      // Send initial status
+
       sendStatusUpdate('initializing', {
-        message: 'Starting WhatsApp automation...',
+        message: 'Starting WhatsApp automation (OpenWA + bundled Chromium)...',
       });
-
-      // Initialize WhatsApp client
-      sendStatusUpdate('connecting', {
-        message: 'Initializing WhatsApp client...',
-      });
-      logInfo('Initializing WhatsApp client...');
-      // Reuse existing client if present, otherwise create and store globally
-      if (waClient) {
-        client = waClient;
-      } else {
-        client = await initializeWhatsAppClient();
-        waClient = client;
+      if (!waClient) {
+        try {
+          waClient = await initializeOpenWAClient();
+        } catch (e) {
+          throw e;
+        }
       }
-      logInfo('WhatsApp client initialized successfully');
+      client = waClient;
       sendStatusUpdate('connected', { message: 'WhatsApp client ready' });
+      logInfo('OpenWA client initialized successfully');
 
-      // Process messages in a loop until no pending rows
       while (!senderControl.stopRequested) {
         sendStatusUpdate('fetching', {
           message: 'Fetching next pending message...',
@@ -259,8 +230,7 @@ const sendWhatsAppMessages = async (req, res) => {
         if (senderControl.stopRequested) break;
 
         if (!row) {
-          // No pending messages; idle for 5 minutes then check again
-          const idleSec = 2 * 60;
+          const idleSec = 120; // 2 minutes
           sendStatusUpdate('idle', {
             message:
               'No pending messages. Idling for 2 minutes before rechecking...',
@@ -269,13 +239,10 @@ const sendWhatsAppMessages = async (req, res) => {
             totalProcessed: processedCount + errorCount,
             waitSeconds: idleSec,
           });
-          logInfo('No pending rows. Waiting 5 minutes before next check...');
-          // Sleep in small chunks so we can stop early
-          const chunkMs = 1000;
-          const totalMs = idleSec * 1000;
-          for (let waited = 0; waited < totalMs; waited += chunkMs) {
+          logInfo('No pending rows. Waiting 2 minutes before next check...');
+          for (let waited = 0; waited < idleSec * 1000; waited += 1000) {
             if (senderControl.stopRequested) break;
-            await sleep(chunkMs);
+            await sleep(1000);
           }
           continue;
         }
@@ -290,29 +257,13 @@ const sendWhatsAppMessages = async (req, res) => {
             },
           });
 
-          // Validate number format and WhatsApp registration before sending
-          let chatId;
+          // Pre-validate number (sendSingleMessage also validates)
           try {
-            const normalized = formatNumberForWhatsApp(row.SMSTo);
-            chatId = `${normalized}@c.us`;
+            formatNumberForWhatsApp(row.SMSTo);
           } catch (e) {
-            await markFailed(row);
+            await markFailed(row, e.message);
             throw new Error(
               `Invalid number format -> marked failed: ${e.message}`,
-            );
-          }
-
-          const isRegistered = await client
-            .isRegisteredUser(chatId)
-            .catch((e) => {
-              throw new Error(
-                `Failed to verify registration: ${e.message || e}`,
-              );
-            });
-          if (!isRegistered) {
-            await markFailed(row);
-            throw new Error(
-              'Number is not registered on WhatsApp -> marked failed',
             );
           }
 
@@ -330,42 +281,42 @@ const sendWhatsAppMessages = async (req, res) => {
             },
           });
 
-          // Wait 15 to 30s after completion (as requested)
           const waitSec = randInt(15, 30);
           sendStatusUpdate('waiting', {
             message: `Waiting ${waitSec} seconds before next message...`,
             waitSeconds: waitSec,
           });
           logInfo(`Waiting ${waitSec}s before next message...`);
-          for (let waited = 0; waited < waitSec; waited++) {
+          for (let i = 0; i < waitSec; i++) {
             if (senderControl.stopRequested) break;
             await sleep(1000);
           }
-        } catch (error) {
+        } catch (err) {
           errorCount++;
-          logErr(`SrNo=${row.SrNo} failed: ${error.message || error}`);
+          logErr(`SrNo=${row?.SrNo} failed: ${err.message || err}`);
+          await markFailed(row, err.message);
 
           sendStatusUpdate('error', {
-            message: `Failed to send message to ${row.SMSTo}: ${error.message}`,
+            message: `Failed to send message to ${row?.SMSTo}: ${err.message}`,
             processedCount,
             errorCount,
-            currentRecord: {
-              SrNo: row.SrNo,
-              SMSTo: row.SMSTo,
-              SMSEventName: row.SMSEventName,
-            },
-            error: error.message,
+            currentRecord: row
+              ? {
+                  SrNo: row.SrNo,
+                  SMSTo: row.SMSTo,
+                  SMSEventName: row.SMSEventName,
+                }
+              : undefined,
+            error: err.message,
           });
 
-          // Optional: small backoff on error to avoid hammering
-          for (let waited = 0; waited < 5; waited++) {
+          for (let i = 0; i < 5; i++) {
             if (senderControl.stopRequested) break;
             await sleep(1000);
           }
         }
       }
 
-      // Send final completion status
       sendStatusUpdate('finished', {
         message: senderControl.stopRequested
           ? 'Sender stopped by user'
@@ -375,34 +326,17 @@ const sendWhatsAppMessages = async (req, res) => {
         totalProcessed: processedCount + errorCount,
       });
     } catch (error) {
-      logErr(
-        `WhatsApp client initialization failed: ${error.message || error}`,
-      );
+      logErr(`WhatsApp client init/send failed: ${error.message || error}`);
       sendStatusUpdate('failed', {
-        message: 'Failed to initialize WhatsApp client',
+        message: 'Failed to initialize or send via WhatsApp client',
         error: error.message,
       });
     } finally {
-      // Do not destroy WhatsApp client; keep it running for continuous processing
-      // Also keep the loop alive; only clean SSE heartbeat if client disconnected
-      // Heartbeat is cleared in the req 'close' handler
       senderControl.isRunning = false;
 
-      // If a hard stop was requested, destroy the client and close SSE
       if (senderControl.stopRequested) {
-        try {
-          if (waClient) {
-            await waClient.destroy();
-            waClient = null;
-            logInfo('WhatsApp client destroyed due to stop request');
-          }
-        } catch (e) {
-          logWarn(`Error destroying WhatsApp client on stop: ${e.message}`);
-        }
-        try {
-          sseOpen = false;
-          if (heartbeat) clearInterval(heartbeat);
-        } catch {}
+        // ❌ DO NOT kill the client here — let it keep running
+        // if (waClient) { await waClient.kill(); waClient = null; }
         try {
           res.end();
         } catch {}
@@ -410,8 +344,6 @@ const sendWhatsAppMessages = async (req, res) => {
     }
   } catch (error) {
     console.error('❌ Send WhatsApp messages error:', error);
-
-    // If headers haven't been sent yet, send error response
     if (!res.headersSent) {
       res.status(500).json({
         success: false,
@@ -419,7 +351,6 @@ const sendWhatsAppMessages = async (req, res) => {
         error: error.message,
       });
     } else {
-      // Send error status update
       const update = JSON.stringify({
         timestamp: new Date().toISOString(),
         status: 'error',
@@ -436,8 +367,7 @@ const sendWhatsAppMessages = async (req, res) => {
   }
 };
 
-//===============Stop Massage sender====================
-
+//=============== WhatsApp sender: stop ====================
 const stopMassageSender = async (_req, res) => {
   senderControl.stopRequested = true;
   return res
@@ -445,9 +375,8 @@ const stopMassageSender = async (_req, res) => {
     .json({ success: true, message: 'Hard stop requested' });
 };
 
-//=============Broadcast Custom Massage ==================
+//============= Broadcast custom message ==================
 const broadcastCustomMassage = async (req, res) => {
-  // Check if database connection is active
   if (!isConnected()) {
     return res.status(500).json({
       success: false,
@@ -455,20 +384,16 @@ const broadcastCustomMassage = async (req, res) => {
         'No active database connection. Please establish connection first.',
     });
   }
-
-  // Prevent multiple concurrent runs
   if (senderControl.isRunning) {
-    return res.status(409).json({
-      success: false,
-      message: 'Sender is already running',
-    });
+    return res
+      .status(409)
+      .json({ success: false, message: 'Sender is already running' });
   }
 
   try {
     senderControl.stopRequested = false;
     senderControl.isRunning = true;
 
-    // Validate payload
     let prepared;
     try {
       prepared = await prepareBroadcastPayload(req.body || {});
@@ -480,7 +405,6 @@ const broadcastCustomMassage = async (req, res) => {
       });
     }
 
-    // Fetch numbers
     let numbers;
     try {
       numbers = await getBroadcastNumbersFromDb();
@@ -492,11 +416,10 @@ const broadcastCustomMassage = async (req, res) => {
       });
     }
 
-    // Normalize and dedupe
     const seen = new Set();
     const recipients = [];
-    let skippedInvalid = 0;
-    let skippedDuplicate = 0;
+    let skippedInvalid = 0,
+      skippedDuplicate = 0;
     for (const raw of numbers) {
       try {
         const normalized = formatNumberForWhatsApp(raw);
@@ -505,9 +428,8 @@ const broadcastCustomMassage = async (req, res) => {
           continue;
         }
         seen.add(normalized);
-        const jid = `${normalized}@c.us`;
-        recipients.push({ raw, jid });
-      } catch (e) {
+        recipients.push(`${normalized}@c.us`);
+      } catch {
         skippedInvalid++;
       }
     }
@@ -524,10 +446,9 @@ const broadcastCustomMassage = async (req, res) => {
       });
     }
 
-    // Initialize/reuse WhatsApp client
     if (!waClient) {
       try {
-        waClient = await initializeWhatsAppClient();
+        waClient = await initializeOpenWAClient();
       } catch (e) {
         return res.status(500).json({
           success: false,
@@ -538,44 +459,15 @@ const broadcastCustomMassage = async (req, res) => {
     }
     const client = waClient;
 
-    // Send one by one
-    let sent = 0;
-    let failed = 0;
-
-    for (let index = 0; index < recipients.length; index++) {
-      const r = recipients[index];
-
-      // Registration check
-      const isRegistered = await client
-        .isRegisteredUser(r.jid)
-        .catch(() => false);
-      if (!isRegistered) {
-        failed++;
-        continue;
-      }
-
-      // Attempt send with 1 retry on transient errors
-      let ok = false;
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          await sendBroadcastToOne(client, r.jid, prepared);
-          ok = true;
-          break;
-        } catch (e) {
-          if (attempt === 1) {
-            const backoff = randInt(3, 5);
-            for (let i = 0; i < backoff; i++) await sleep(1000);
-          }
-        }
-      }
-
-      if (ok) {
+    let sent = 0,
+      failed = 0;
+    for (const jid of recipients) {
+      try {
+        await sendBroadcastToOne(client, jid, prepared);
         sent++;
-      } else {
+      } catch {
         failed++;
       }
-
-      // Random delay 15–30s between recipients
       const waitSec = randInt(15, 30);
       for (let i = 0; i < waitSec; i++) await sleep(1000);
     }
@@ -597,51 +489,37 @@ const broadcastCustomMassage = async (req, res) => {
     });
   } finally {
     senderControl.isRunning = false;
-    // Close WhatsApp browser after task completion
+    // Optional: close after broadcast to free resources
     try {
       if (waClient) {
-        await waClient.destroy();
+        await waClient.kill();
         waClient = null;
-        logInfo('WhatsApp client destroyed after broadcast completion');
+        logInfo('OpenWA client destroyed after broadcast completion');
       }
     } catch (e) {
-      logWarn(`Error destroying WhatsApp client after broadcast: ${e.message}`);
+      logWarn(`Error destroying OpenWA client after broadcast: ${e.message}`);
     }
   }
 };
 
-//========Close Connection with Database ===============
+//======== Database: close ==================
 const closeConnectionWithDb = async (_req, res) => {
   try {
     console.log('🔄 Attempting to close database connection...');
-
-    // If sender is running, request stop first
-    if (senderControl.isRunning) {
-      senderControl.stopRequested = true;
-    }
+    if (senderControl.isRunning) senderControl.stopRequested = true;
 
     const result = await closeConnection();
-
     if (result.success) {
-      console.log('✅ Database connection closed successfully');
-      // Clear WhatsApp LocalAuth session so next run requires QR scan
       try {
         clearWhatsAppSession();
       } catch {}
-      res.status(200).json({
-        success: true,
-        message: result.message,
-      });
+      res.status(200).json({ success: true, message: result.message });
     } else {
-      console.log('❌ Failed to close database connection:', result.message);
-      res.status(500).json({
-        success: false,
-        message: result.message,
-        error: result.error,
-      });
+      res
+        .status(500)
+        .json({ success: false, message: result.message, error: result.error });
     }
   } catch (error) {
-    console.error('❌ Error closing database connection:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to close database connection',

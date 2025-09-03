@@ -1,31 +1,32 @@
+// server/src/routes/index.js
 const express = require('express');
-const {
-  databaseConnection,
-  getAllRecords,
-  closeConnectionWithDb,
-  sendWhatsAppMessages,
-  stopMassageSender,
-  broadcastCustomMassage,
-} = require('../controller');
-
 const router = express.Router();
 
-// Initialize database connection with user-provided settings
-router.post('/database-connection', databaseConnection);
+// IMPORTANT: correct, plural "controllers"
+const ctrl = require('../controller/index');
 
-// Get all records from ES_SMS table where SendStatus = 0
-router.get('/getrecords', getAllRecords);
+// Sanity check to avoid "argument handler must be a function" errors
+[
+  'databaseConnection',
+  'getAllRecords',
+  'closeConnectionWithDb',
+  'sendWhatsAppMessages',
+  'stopMassageSender',
+  'broadcastCustomMassage',
+].forEach((fn) => {
+  if (typeof ctrl[fn] !== 'function') {
+    throw new Error(
+      `Controller export "${fn}" is missing or not a function. Check controllers/index.js`,
+    );
+  }
+});
 
-//send whatsapp message
-router.post('/send-messages', sendWhatsAppMessages);
-
-// Stop WhatsApp sender loop (hard stop)
-router.post('/stop-sender', stopMassageSender);
-
-// broadcast custom massage
-router.post('/broadcast', broadcastCustomMassage);
-
-// Route to close the database connection
-router.post('/close-database-connection', closeConnectionWithDb);
+// Your existing routes (kept the same URLs you were calling)
+router.post('/db/connect', ctrl.databaseConnection);
+router.post('/db/close', ctrl.closeConnectionWithDb);
+router.get('/records', ctrl.getAllRecords);
+router.get('/sender/start', ctrl.sendWhatsAppMessages);
+router.post('/sender/stop', ctrl.stopMassageSender);
+router.post('/broadcast', ctrl.broadcastCustomMassage);
 
 module.exports = router;

@@ -29,7 +29,7 @@ export const connectDatabase = createAsyncThunk(
         MSSQL_PASSWORD: formValues.password,
       };
 
-      const response = await api.post('/database-connection', payload);
+      const response = await api.post('/db/connect', payload);
       return response.data;
     } catch (error) {
       const data = error?.response?.data;

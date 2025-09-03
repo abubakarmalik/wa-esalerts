@@ -90,8 +90,8 @@ const ActiveTask = () => {
       abortRef.current = controller;
 
       void api
-        .post(
-          '/send-messages',
+        .get(
+          '/sender/start',
           {},
           {
             headers: { Accept: 'text/event-stream' },
@@ -127,7 +127,7 @@ const ActiveTask = () => {
       abortRef.current?.abort();
     } catch {}
     try {
-      await api.post('/stop-sender');
+      await api.post('/sender/stop');
       toast.info('Process stopped');
     } catch (error) {
       toast.error(

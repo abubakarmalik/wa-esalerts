@@ -111,7 +111,7 @@ const Sidebar = () => {
 
   const handleLogout = async () => {
     try {
-      await api.post('/close-database-connection', {});
+      await api.post('/db/close', {});
       dispatch(logout());
       toast.success('Disconnected and logged out');
       navigate('/connection');

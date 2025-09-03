@@ -15,8 +15,8 @@ export const startSender = createAsyncThunk(
     try {
       // Fire-and-forget: trigger the long-running server process but do not await
       // so the thunk can resolve immediately and the UI can continue.
-      void api.post(
-        '/send-messages',
+      void api.get(
+        '/sender/start',
         {},
         { headers: { Accept: 'text/event-stream' } },
       );
@@ -33,7 +33,7 @@ export const startSender = createAsyncThunk(
 export const stopSender = createAsyncThunk(
   'activeTask/stopSender',
   async () => {
-    await api.post('/stop-sender');
+    await api.post('/sender/stop');
     return { success: true };
   },
 );
