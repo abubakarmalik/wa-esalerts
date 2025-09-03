@@ -1,5 +1,6 @@
 @import 'tailwindcss';
 @plugin "daisyui";
+@import 'react-toastify/dist/ReactToastify.css';
 
 /* Global styles */
 

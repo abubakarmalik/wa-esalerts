@@ -1,6 +1,7 @@
 import React from 'react';
 import Sidebar from '../components/sidebar.jsx';
 import Branding from '../components/branding';
+import SendForm from '../components/sendForm.jsx';
 
 const Broadcast = () => {
   return (
@@ -9,10 +10,11 @@ const Broadcast = () => {
       <div className="flex-1 overflow-auto">
         <Branding />
         <div className="p-8 pb-16">
-          {/* Your main content goes here */}
-          <h1 className="text-2xl font-semibold text-gray-800">
-            Sent Message to All
-          </h1>
+          <div className="bg-gray-200 rounded-lg shadow-md p-6 mt-4">
+            <div className="space-y-4 text-base-100">
+              <SendForm />
+            </div>
+          </div>
         </div>
       </div>
     </div>
