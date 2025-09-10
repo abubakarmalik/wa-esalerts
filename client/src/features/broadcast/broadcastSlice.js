@@ -13,6 +13,7 @@ import { toast } from 'react-toastify';
  *    we fallback to JSON (assumes server can resolve local path by `filePath`).
  */
 function buildRequest({
+  branchCode,
   messageType,
   textMessage,
   caption,
@@ -24,7 +25,7 @@ function buildRequest({
   if (messageType === 'text') {
     return {
       useFormData: false,
-      body: { type: 'text', text: (textMessage || '').trim() },
+      body: { branchCode, type: 'text', text: (textMessage || '').trim() },
     };
   }
 
@@ -36,6 +37,7 @@ function buildRequest({
   // Prefer multipart when a File object is present
   if (selectedFile) {
     const fd = new FormData();
+    fd.append('branchCode', branchCode);
     fd.append('type', type);
     if (base.caption) fd.append('caption', base.caption);
     fd.append('file', selectedFile); // server must accept multipart
@@ -46,6 +48,7 @@ function buildRequest({
   return {
     useFormData: false,
     body: {
+      branchCode,
       type,
       caption: base.caption,
       filePath: filePath || '', // server must resolve this path
@@ -59,9 +62,8 @@ export const sendBroadcast = createAsyncThunk(
     try {
       const { useFormData, body } = buildRequest(payload);
       const headers = useFormData
-        ? { 'Content-Type': 'multipart/form-data' }
+        ? undefined
         : { 'Content-Type': 'application/json' };
-
       const res = await api.post('/broadcast', body, { headers });
       return res.data;
     } catch (err) {

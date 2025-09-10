@@ -5,11 +5,13 @@ const fs = require('fs');
 const path = require('path');
 const { create, ev } = require('@open-wa/wa-automate');
 const { executeQuery, isConnected } = require('./db');
+const { execFile } = require('child_process');
 
 // ======== Settings ========
-const SESSION_DIR = path.join(process.cwd(), 'wa-openwa-session'); // persists login
+const SESSION_DIR = path.join(process.cwd(), 'wa-openwa-session');
 const SESSION_ID = process.env.WA_SESSION_ID || 'openwa-session';
-const ACK_SLEEP_MS = 500; // small sleep between status polls
+const ACK_SLEEP_MS = 500;
+let BROWSER_PID = null; // <— ADD
 
 // ======== Logging & Utils ========
 const now = () => new Date().toISOString();
@@ -19,33 +21,48 @@ const logWarn = (m) => log('warn', `WARN: ${m}`);
 const logErr = (m) => log('error', `ERROR: ${m}`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+function getBrowserPid() {
+  return BROWSER_PID;
+} // <— ADD
 
 // ======== Number formatting (Pakistan + general) ========
 function formatNumberForWhatsApp(rawNumber) {
-  let s = String(rawNumber || '').trim();
-  if (!s) throw new Error('Phone number cannot be empty');
+  let input = String(rawNumber || '').trim();
+  if (!input) throw new Error('Phone number cannot be empty');
 
-  // Accept typical formats; then normalize to digits only
-  const accepted = [
-    /^03\d{9}$/,
-    /^923\d{9}$/,
-    /^\+923\d{9}$/,
-    /^03\d{2}-\d{7}$/,
-    /^92-3\d{2}-\d{7}$/,
-    /^\+92-3\d{2}-\d{7}$/,
-    /^03\d{2}\s\d{7}$/,
-    /^92\s3\d{2}\s\d{7}$/,
-    /^\+92\s3\d{2}\s\d{7}$/,
-  ].some((re) => re.test(s));
-  if (!accepted) s = s.replace(/[^\d]/g, '');
+  // Define valid patterns
+  const validPatterns = [
+    /^03\d{9}$/, // 03XXXXXXXXX
+    /^923\d{9}$/, // 92XXXXXXXXX
+    /^\+923\d{9}$/, // +92XXXXXXXXX
+    /^03\d{2}-\d{7}$/, // 03XX-XXXXXXX
+    /^92-3\d{2}-\d{7}$/, // 92-3XX-XXXXXXX
+    /^\+92-3\d{2}-\d{7}$/, // +92-3XX-XXXXXXX
+    /^03\d{2}\s\d{7}$/, // 03XX XXXXXXX
+    /^92\s3\d{2}\s\d{7}$/, // 92 3XX XXXXXXX
+    /^\+92\s3\d{2}\s\d{7}$/, // +92 3XX XXXXXXX
+  ];
 
-  if (s.startsWith('00')) s = s.slice(2); // 0092... -> 92...
-  if (s.startsWith('03') && s.length === 11) s = '92' + s.slice(1); // local -> intl
-
-  if (!/^[1-9]\d{9,14}$/.test(s)) {
-    throw new Error(`Invalid MSISDN after normalization: "${s}"`);
+  // Check if number matches any valid pattern
+  const isValidFormat = validPatterns.some((pattern) => pattern.test(input));
+  if (!isValidFormat) {
+    throw new Error('Invalid phone number format');
   }
-  return s;
+
+  // Remove all non-digits
+  input = input.replace(/[^\d]/g, '');
+
+  // Convert 03... to 923...
+  if (input.startsWith('03')) {
+    input = '92' + input.slice(1);
+  }
+
+  // Ensure the final number is in correct format (923XXXXXXXXX)
+  if (!input.match(/^923\d{9}$/)) {
+    throw new Error('Invalid phone number format');
+  }
+
+  return input;
 }
 const toChatId = (raw) => `${formatNumberForWhatsApp(raw)}@c.us`;
 
@@ -124,7 +141,7 @@ async function initializeOpenWAClient() {
 
     // Stability & perf
     cacheEnabled: false,
-    restartOnCrash: true,
+    restartOnCrash: false,
     killProcessOnBrowserClose: false,
     qrTimeout: 0, // wait indefinitely for first-time QR
     authTimeout: 0,
@@ -144,6 +161,22 @@ async function initializeOpenWAClient() {
     logConsole: true,
     // logQR: true, // enable to print ascii QR in console
   });
+
+  // … your existing create({ … }) call above …
+
+  // Capture Puppeteer Browser PID for safe shutdowns later
+  try {
+    const browser =
+      client.pupBrowser ||
+      (typeof client.getPuppeteerBrowser === 'function' &&
+        (await client.getPuppeteerBrowser())) ||
+      null;
+
+    BROWSER_PID =
+      typeof browser?.process === 'function' ? browser.process()?.pid : null;
+  } catch {
+    BROWSER_PID = null;
+  }
 
   // Some useful events
   ev.on('qr.**', (q) => console.log('[QR EVENT]', q));
@@ -193,23 +226,33 @@ async function prepareBroadcastPayload(body) {
 
   if (type === 'text') {
     if (!text) throw new Error('text is required for text broadcasts');
+
     return { mode: 'text', text };
   }
 
   if (!filePath) throw new Error('filePath is required for media broadcasts');
-  if (!fs.existsSync(filePath)) throw new Error('file does not exist');
-
+  // if (!fs.existsSync(filePath)) throw new Error('file does not exist');
   return { mode: 'media', filePath, caption };
 }
 
-async function getBroadcastNumbersFromDb() {
+async function getBroadcastNumbersFromDb(branchCode) {
   if (!isConnected())
     throw new Error('No active database connection. Connect DB first.');
-  const q = 'SELECT SMSTo FROM ES_SMS;';
-  const result = await executeQuery(q);
+
+  const sqlText = `
+    EXEC dbo.GetStudentContactNumbers @BranchCode = @Branch
+  `;
+  const result = await executeQuery(sqlText, {
+    Branch: String(branchCode ?? 'All'),
+  });
+
   if (!result.success)
     throw new Error(result.message || 'Failed to fetch numbers');
-  return (result.data || []).map((r) => r.SMSTo).filter(Boolean);
+
+  // If you applied the DISTINCT/LTRIM in the proc, this is already clean:
+  return (result.data || [])
+    .map((r) => (r.SMSTo || r.fldCell1 || '').trim())
+    .filter(Boolean);
 }
 
 async function sendBroadcastToOne(client, jid, prepared) {
@@ -239,6 +282,81 @@ function clearWhatsAppSession() {
   }
 }
 
+function taskkillWin(pid) {
+  return new Promise((resolve) => {
+    if (!pid) return resolve();
+    execFile('taskkill', ['/PID', String(pid), '/T', '/F'], () => resolve());
+  });
+}
+
+// Kill any Chromium whose command line contains a unique fragment (e.g., session dir)
+function psKillByCommandLineFragment(fragment) {
+  return new Promise((resolve) => {
+    if (process.platform !== 'win32' || !fragment) return resolve();
+    const cmd = [
+      '-NoProfile',
+      '-Command',
+      `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${fragment.replace(
+        /\\/g,
+        '\\\\',
+      )}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`,
+    ];
+    execFile('powershell.exe', cmd, () => resolve());
+  });
+}
+
+// Graceful + safe hard-close for OpenWA (no wmic, no waClient.kill())
+// - Kills by saved PID
+// - Also tries live PID from Puppeteer
+// - Last resort: PowerShell kill by session folder tag
+async function safeCloseOpenWA(client) {
+  if (!client) return;
+
+  // DEFAULT session tag = folder name "wa-openwa-session" (unique in command line)
+  const sessionTag = path.basename(SESSION_DIR);
+
+  let browser = null;
+  let livePid = null;
+
+  // Try to obtain live Puppeteer browser + PID
+  try {
+    browser =
+      client.pupBrowser ||
+      (typeof client.getPuppeteerBrowser === 'function' &&
+        (await client.getPuppeteerBrowser())) ||
+      null;
+
+    livePid =
+      typeof browser?.process === 'function' ? browser.process()?.pid : null;
+  } catch {
+    livePid = null;
+  }
+
+  // Windows: hard-kill by PID (saved & live) then by command line tag
+  if (process.platform === 'win32') {
+    // 1) Kill saved PID if we captured it
+    try {
+      await taskkillWin(BROWSER_PID);
+    } catch {}
+    // 2) Kill live PID if different
+    try {
+      if (livePid && livePid !== BROWSER_PID) {
+        await taskkillWin(livePid);
+      }
+    } catch {}
+    // 3) Kill any remaining matching processes by command line (session dir)
+    try {
+      await psKillByCommandLineFragment(sessionTag);
+    } catch {}
+    return;
+  }
+
+  // Non-Windows: best-effort graceful close
+  try {
+    await browser?.close?.();
+  } catch {}
+}
+
 module.exports = {
   // logs/utils
   now,
@@ -262,6 +380,11 @@ module.exports = {
   initializeOpenWAClient,
   sendSingleMessage,
   clearWhatsAppSession,
+  taskkillWin,
+  //
+  getBrowserPid, // <— ADD
+  psKillByCommandLineFragment, // (optional export)
+  safeCloseOpenWA, // <— ADD
 
   // Broadcast
   prepareBroadcastPayload,

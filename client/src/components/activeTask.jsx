@@ -76,12 +76,19 @@ const ActiveTask = () => {
       } catch {}
     };
   }, []);
+  const formateDate = () => {
+    const now = new Date();
+    const formattedDate = now.toLocaleDateString(); // e.g., "9/8/2025"
+    const formattedTime = now.toLocaleTimeString(); // e.g., "6:09:24 PM"
+    const date = formattedDate + ' ' + formattedTime;
+    return date;
+  };
 
   const handleStart = async () => {
     if (running || isBusy) return;
     setIsBusy(true);
     setRunning(true);
-    const startedAt = new Date().toISOString();
+    const startedAt = formateDate();
     setMessage('Starting sending WhatsApp messages...');
     setLastUpdateTime(startedAt);
 
@@ -105,7 +112,7 @@ const ActiveTask = () => {
             );
             setRunning(false);
             setMessage('Ready to start sending WhatsApp messages.');
-            setLastUpdateTime(new Date().toISOString());
+            setLastUpdateTime(formateDate());
           }
         });
 
@@ -114,7 +121,7 @@ const ActiveTask = () => {
       toast.error(error?.message || 'Failed to start');
       setRunning(false);
       setMessage('Ready to start sending WhatsApp messages.');
-      setLastUpdateTime(new Date().toISOString());
+      setLastUpdateTime(formateDate());
     } finally {
       setIsBusy(false);
     }
@@ -136,7 +143,7 @@ const ActiveTask = () => {
     } finally {
       setRunning(false);
       setMessage('Ready to start sending WhatsApp messages.');
-      setLastUpdateTime(new Date().toISOString());
+      setLastUpdateTime(formateDate());
       setIsBusy(false);
     }
   };

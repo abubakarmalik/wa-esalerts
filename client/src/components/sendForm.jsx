@@ -29,10 +29,18 @@ const SendForm = () => {
   const { status } = useSelector((s) => s.broadcast || { status: 'idle' });
   const isSubmitting = status === 'loading';
 
+  const [branchCode, setBranchCode] = useState('All');
   const [messageType, setMessageType] = useState('text');
   const [textMessage, setTextMessage] = useState('');
   const [caption, setCaption] = useState('');
   const [filePath, setFilePath] = useState('');
+
+  const branchCodes = [
+    { value: 'All', label: 'All Branches' },
+    { value: '1', label: 'Branch 1' },
+    { value: '2', label: 'Branch 2' },
+    { value: '3', label: 'Branch 3' },
+  ]; // Future use
 
   const messageTypes = [
     { value: 'text', label: 'Text Message', icon: '💬' },
@@ -71,10 +79,11 @@ const SendForm = () => {
     try {
       await dispatch(
         sendBroadcast({
+          branchCode,
           messageType,
           textMessage,
           caption,
-          filePath: filePath.trim(), // JSON path for backend to read from disk
+          filePath: filePath.trim(),
         }),
       ).unwrap();
 
@@ -86,6 +95,7 @@ const SendForm = () => {
       setCaption('');
       setFilePath('');
       setMessageType('text');
+      setBranchCode('All');
     } catch {
       // Errors are toasted in the slice
     }
@@ -96,6 +106,7 @@ const SendForm = () => {
     setCaption('');
     setFilePath('');
     setMessageType('text');
+    setBranchCode(0);
   };
 
   const getIconForType = (type) => {
@@ -135,6 +146,23 @@ const SendForm = () => {
               {/* Left column */}
               <div className="lg:col-span-2">
                 <div className="space-y-6">
+                  {/* Campus Option */}
+                  <div className="rounded-xl bg-gradient-to-br from-gray-50 to-white p-5 ring-1 ring-gray-200">
+                    <label className="block text-sm font-medium text-gray-700 mb-3">
+                      Branch Option
+                    </label>
+                    <select
+                      value={branchCode}
+                      onChange={(e) => setBranchCode(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
+                    >
+                      {branchCodes.map((type) => (
+                        <option key={type.value} value={type.value}>
+                          {type.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                   {/* Whatsapp Option */}
                   <div className="rounded-xl bg-gradient-to-br from-gray-50 to-white p-5 ring-1 ring-gray-200">
                     <label className="block text-sm font-medium text-gray-700 mb-3">
@@ -241,7 +269,7 @@ const SendForm = () => {
               </div>
 
               {/* Actions Panel */}
-              <div className="flex flex-col justify-between rounded-xl ring-1 ring-gray-200 p-5 bg-white/80">
+              <div className="flex flex-col justify-between rounded-xl ring-1 ring-gray-200 p-5 bg-white/80 backdrop-blur-sm">
                 <div>
                   <h3 className="text-sm font-medium text-gray-900">Actions</h3>
                   <p className="text-xs text-gray-500 mt-1">

@@ -18,10 +18,10 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 // API
 app.use('/api', routes);
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 4000;
 
 const server = app.listen(PORT, async () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
+  console.log(`Server is running on http://127.0.0.1:${PORT}`);
 
   // Optional: auto-connect DB if a config was persisted previously
   const result = await loadPersistedConnectionIfAny();

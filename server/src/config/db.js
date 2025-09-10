@@ -202,3 +202,30 @@ module.exports = {
   closeConnection,
   loadPersistedConnectionIfAny,
 };
+
+/* 
+use ESDb
+SELECT  dbo.student.CampusCode, dbo.student.fldCell1
+FROM    dbo.student LEFT OUTER JOIN
+dbo.student_class ON dbo.student.SystemCode = dbo.student_class.SystemCode AND dbo.student.CampusCode = dbo.student_class.CampusCode AND dbo.student.RegCode = dbo.student_class.RegCode
+WHERE  (dbo.student_class.Active = 1) AND (dbo.student_class.SessionCode =(SELECT MAX(SessionCode) AS Expr1 FROM dbo.Session WHERE   (Active = 1))) 
+AND (dbo.student.Active = 1)
+//
+
+use ESDb
+
+declare @BranchCode nvarchar(10) = 'All'
+
+SELECT  dbo.student.CampusCode, dbo.student.fldCell1
+FROM    dbo.student LEFT OUTER JOIN
+dbo.student_class ON dbo.student.SystemCode = dbo.student_class.SystemCode AND dbo.student.CampusCode = dbo.student_class.CampusCode AND dbo.student.RegCode = dbo.student_class.RegCode
+WHERE  (dbo.student_class.Active = 1) AND (dbo.student_class.SessionCode =(SELECT MAX(SessionCode) AS Expr1 FROM dbo.Session WHERE   (Active = 1))) 
+AND (dbo.student.Active = 1)
+and 
+Cast(dbo.student.CampusCode as nvarchar(10)) like Case when @BranchCode = 'All' Then '%' else @BranchCode end
+//
+
+use ESDB 
+SELECT campuscode from tblcampus WHERE Active=1
+
+*/

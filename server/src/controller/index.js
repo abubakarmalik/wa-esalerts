@@ -19,6 +19,8 @@ const {
   clearWhatsAppSession,
   formatNumberForWhatsApp,
   markFailed,
+  // new helpers for safe client management
+  safeCloseOpenWA,
 
   // broadcast helpers
   prepareBroadcastPayload,
@@ -158,7 +160,7 @@ const sendWhatsAppMessages = async (req, res) => {
     // SSE headers (no buffering)
     res.status(200);
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Cache-Control', 'no-cache, no-tranclssform');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no'); // for nginx
     if (typeof res.flushHeaders === 'function') res.flushHeaders();
@@ -336,7 +338,10 @@ const sendWhatsAppMessages = async (req, res) => {
 
       if (senderControl.stopRequested) {
         // ❌ DO NOT kill the client here — let it keep running
-        // if (waClient) { await waClient.kill(); waClient = null; }
+        // if (waClient) {
+        //   await waClient.kill();
+        //   waClient = null;
+        // }
         try {
           res.end();
         } catch {}
@@ -368,15 +373,32 @@ const sendWhatsAppMessages = async (req, res) => {
 };
 
 //=============== WhatsApp sender: stop ====================
-const stopMassageSender = async (_req, res) => {
-  senderControl.stopRequested = true;
-  return res
-    .status(200)
-    .json({ success: true, message: 'Hard stop requested' });
+const stopMessageSender = async (_req, res) => {
+  try {
+    senderControl.stopRequested = true;
+    senderControl.isRunning = false;
+
+    // if (waClient) {
+    //   await safeCloseOpenWA(waClient); // <— no wmic, no kill()
+    //   waClient = null;
+    //   logInfo('OpenWA client closed via safeCloseOpenWA');
+    // }
+
+    return res
+      .status(200)
+      .json({ success: true, message: 'Hard stop requested, client closed' });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to stop',
+      error: error.message,
+    });
+  }
 };
 
 //============= Broadcast custom message ==================
-const broadcastCustomMassage = async (req, res) => {
+const broadcastCustomMessage = async (req, res) => {
+  // -------- guards --------
   if (!isConnected()) {
     return res.status(500).json({
       success: false,
@@ -390,13 +412,57 @@ const broadcastCustomMassage = async (req, res) => {
       .json({ success: false, message: 'Sender is already running' });
   }
 
+  // -------- read + validate incoming payload from React --------
+  const branchCode = (req.body?.branchCode ?? 'All').toString(); // 'All' | '1' | '2' | '3'
+  const messageType = (req.body?.type ?? 'text').toString(); // 'text' | 'image' | 'pdf' | 'image-caption' | 'pdf-caption'
+  const textMessage = (req.body?.text ?? '').toString();
+  const caption = (req.body?.caption ?? '').toString();
+  const filePathStr = (req.body?.filePath ?? '').toString().trim();
+
+  // translate the React shape -> helper.prepareBroadcastPayload({ type, text, caption, filePath })
+  const needsFile = /image|pdf|video/.test(messageType);
+  const needsCaption = /-caption$/.test(messageType);
+  if (messageType === 'text' && !textMessage.trim()) {
+    return res
+      .status(400)
+      .json({ success: false, message: 'Text message is required' });
+  }
+  if (needsFile && !filePathStr) {
+    return res.status(400).json({
+      success: false,
+      message: 'filePath is required for media types',
+    });
+  }
+  if (needsCaption && !caption.trim()) {
+    return res.status(400).json({
+      success: false,
+      message: 'caption is required for *-caption types',
+    });
+  }
+
+  // construct the helper-compatible payload
+  const helperPayload = {
+    type:
+      messageType === 'text'
+        ? 'text'
+        : messageType.includes('image')
+        ? 'image'
+        : messageType.includes('pdf')
+        ? 'pdf'
+        : messageType,
+    text: textMessage,
+    caption,
+    filePath: filePathStr,
+  };
+
   try {
     senderControl.stopRequested = false;
     senderControl.isRunning = true;
 
+    // -------- normalize/validate content via helper --------
     let prepared;
     try {
-      prepared = await prepareBroadcastPayload(req.body || {});
+      prepared = await prepareBroadcastPayload(helperPayload); // uses helper.js contract
     } catch (e) {
       return res.status(400).json({
         success: false,
@@ -405,9 +471,12 @@ const broadcastCustomMassage = async (req, res) => {
       });
     }
 
+    // -------- fetch numbers (filtered by branch, if your helper supports it) --------
+    // NOTE: getBroadcastNumbersFromDb in your current helper takes no args.
+    // If you updated it to accept a filter, passing branchCode here will apply it.
     let numbers;
     try {
-      numbers = await getBroadcastNumbersFromDb();
+      numbers = await getBroadcastNumbersFromDb(branchCode); // if helper ignores param, this still returns "all"
     } catch (e) {
       return res.status(500).json({
         success: false,
@@ -416,13 +485,15 @@ const broadcastCustomMassage = async (req, res) => {
       });
     }
 
+    // -------- normalize, dedupe, and build JIDs --------
     const seen = new Set();
     const recipients = [];
     let skippedInvalid = 0,
       skippedDuplicate = 0;
+
     for (const raw of numbers) {
       try {
-        const normalized = formatNumberForWhatsApp(raw);
+        const normalized = formatNumberForWhatsApp(raw); // -> 92xxxxxxxxxx
         if (seen.has(normalized)) {
           skippedDuplicate++;
           continue;
@@ -437,15 +508,20 @@ const broadcastCustomMassage = async (req, res) => {
     if (recipients.length === 0) {
       return res.status(200).json({
         success: true,
-        message: 'No valid recipients found',
-        sent: 0,
-        failed: 0,
-        total: 0,
-        skippedInvalid,
-        skippedDuplicate,
+        message: 'No valid recipients found for selected branch',
+        branchCode,
+        totals: {
+          sent: 0,
+          failed: 0,
+          notWhatsApp: 0,
+          totalTried: 0,
+          skippedInvalid,
+          skippedDuplicate,
+        },
       });
     }
 
+    // -------- init client if needed --------
     if (!waClient) {
       try {
         waClient = await initializeOpenWAClient();
@@ -459,27 +535,51 @@ const broadcastCustomMassage = async (req, res) => {
     }
     const client = waClient;
 
+    // -------- send loop --------
     let sent = 0,
-      failed = 0;
+      failed = 0,
+      notWhatsApp = 0;
+
     for (const jid of recipients) {
+      if (senderControl.stopRequested) break;
+
       try {
+        // deliverability pre-check (open-wa)
+        const status = await client.checkNumberStatus(jid).catch(() => null);
+        if (!status || status.canReceiveMessage !== true) {
+          notWhatsApp++;
+          throw new Error('Number cannot receive WhatsApp messages');
+        }
+
+        // send using your helper (handles text vs file)
         await sendBroadcastToOne(client, jid, prepared);
         sent++;
-      } catch {
+      } catch (err) {
         failed++;
+        logWarn(`Broadcast to ${jid} failed: ${err?.message || err}`);
       }
+
+      // polite throttling
       const waitSec = randInt(15, 30);
-      for (let i = 0; i < waitSec; i++) await sleep(1000);
+      for (let i = 0; i < waitSec; i++) {
+        if (senderControl.stopRequested) break;
+        await sleep(1000);
+      }
     }
 
     return res.status(200).json({
       success: true,
       message: 'Broadcast complete',
-      sent,
-      failed,
-      total: recipients.length,
-      skippedInvalid,
-      skippedDuplicate,
+      branchCode,
+      messageType,
+      totals: {
+        sent,
+        failed,
+        notWhatsApp,
+        totalTried: recipients.length,
+        skippedInvalid,
+        skippedDuplicate,
+      },
     });
   } catch (error) {
     return res.status(500).json({
@@ -489,16 +589,16 @@ const broadcastCustomMassage = async (req, res) => {
     });
   } finally {
     senderControl.isRunning = false;
-    // Optional: close after broadcast to free resources
-    try {
-      if (waClient) {
-        await waClient.kill();
-        waClient = null;
-        logInfo('OpenWA client destroyed after broadcast completion');
-      }
-    } catch (e) {
-      logWarn(`Error destroying OpenWA client after broadcast: ${e.message}`);
-    }
+    // keep or remove this depending on whether you want the client to persist
+    // try {
+    //   if (waClient) {
+    //     await safeCloseOpenWA(waClient);
+    //     waClient = null;
+    //     logInfo('OpenWA client closed after broadcast via safeCloseOpenWA');
+    //   }
+    // } catch (e) {
+    //   logWarn(`Error closing OpenWA client after broadcast: ${e.message}`);
+    // }
   }
 };
 
@@ -533,6 +633,6 @@ module.exports = {
   getAllRecords,
   closeConnectionWithDb,
   sendWhatsAppMessages,
-  stopMassageSender,
-  broadcastCustomMassage,
+  stopMessageSender,
+  broadcastCustomMessage,
 };
